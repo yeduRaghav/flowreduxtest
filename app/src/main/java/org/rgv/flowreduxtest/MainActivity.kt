@@ -3,16 +3,22 @@ package org.rgv.flowreduxtest
 import android.app.Application
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,12 +48,38 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
+            val appStore: AppStore = koinInject()
+
+            LaunchedEffect(appStore) {
+                appStore.stateFlow.collect { _ ->
+                    if (appStore.lastAction == ExitApp) {
+                        finish()
+                    }
+                }
+            }
+
             FlowReduxTestTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    HomeScreen()
+                    AppNavigation()
                 }
             }
         }
+    }
+}
+
+@Composable
+fun AppNavigation() {
+    val appStore: AppStore = koinInject()
+    val appState by appStore.stateFlow.collectAsState()
+
+    BackHandler(enabled = appState.currentScreen != Screen.HOME) {
+        appStore.dispatchAction(NavigationAction.NavigateBack)
+    }
+
+    when (appState.currentScreen) {
+        Screen.HOME -> HomeScreen()
+        Screen.PROFILE -> ProfileScreen()
+        Screen.SETTINGS -> SettingsScreen()
     }
 }
 
@@ -56,9 +88,33 @@ class MainActivity : ComponentActivity() {
 fun HomeScreen() {
 
     val appStore: AppStore = koinInject()
-
     val appState by appStore.stateFlow.collectAsState()
     val dispatcher: ActionDispatcher = appStore
+    var showExitDialog by remember { mutableStateOf(false) }
+
+    BackHandler {
+        showExitDialog = true
+    }
+
+    if (showExitDialog) {
+        AlertDialog(
+            onDismissRequest = { showExitDialog = false },
+            title = { Text("Exit App") },
+            text = { Text("Are you sure you want to exit the app?") },
+            confirmButton = {
+                Button(onClick = {
+                    dispatcher.dispatchAction(ExitApp)
+                }) {
+                    Text("Yes")
+                }
+            },
+            dismissButton = {
+                Button(onClick = { showExitDialog = false }) {
+                    Text("No")
+                }
+            }
+        )
+    }
 
     Column {
         Text("Counter: ${appState.homeState.counter}")
@@ -79,6 +135,9 @@ fun HomeScreen() {
         } else {
             Text("Data 1: ${appState.homeState.data1 ?: "No data"}")
             Text("Data 2: ${appState.homeState.data2 ?: "No data"}")
+        }
+        Button(onClick = { dispatcher.dispatchAction(NavigationAction.NavigateToProfile("myUserId")) }) {
+            Text("Go to Profile")
         }
     }
 }
@@ -104,7 +163,6 @@ val appModule = module {
     single { CoroutineScope(Dispatchers.Default) }
 
     single { AppStore(get(), get()) }
-
 
     single<Set<TypedSideEffect<*, *>>> {
         setOf(
@@ -136,6 +194,19 @@ class TypedSideEffect<STATE, ACTION : Action>(
     val stateSelector: (AppState) -> STATE
 )
 
+//////////// Global Actions  ////////////
+enum class Screen {
+    HOME, PROFILE, SETTINGS
+}
+
+sealed class NavigationAction : Action {
+    data class NavigateToProfile(val userId: String) : NavigationAction()
+    data class NavigateToSettings(val fromScreen: Screen) : NavigationAction()
+    data object NavigateBack : NavigationAction()
+}
+
+data object ExitApp : Action
+
 //////////// STORE ////////////
 class AppStore(
     private val store: Store<AppState>,
@@ -145,6 +216,9 @@ class AppStore(
     private val _stateFlow = MutableStateFlow(AppState())
     val stateFlow: StateFlow<AppState> = _stateFlow.asStateFlow()
 
+    var lastAction: Action? = null
+        private set
+
     init {
         store.subscribe {
             _stateFlow.value = store.state
@@ -152,11 +226,8 @@ class AppStore(
     }
 
     override fun dispatchAction(action: Action) {
-//        scope.launch {
-//            store.dispatch(action)
-//        }
-
         store.dispatch(action)
+        lastAction = action
     }
 }
 
@@ -215,7 +286,9 @@ class FetchData2SideEffect : SideEffect<HomeState, HomeAction.FetchData2> {
 data class AppState(
     val homeState: HomeState = HomeState(),
     val profileState: ProfileState = ProfileState(),
-    val settingsState: SettingsState = SettingsState()
+    val settingsState: SettingsState = SettingsState(),
+    val currentScreen: Screen = Screen.HOME,
+    val navigationParams: Map<String, Any> = emptyMap()
 )
 
 val appReducer = reducerForActionType<AppState, Action> { state, action ->
@@ -231,6 +304,35 @@ val appReducer = reducerForActionType<AppState, Action> { state, action ->
         is SettingsAction -> state.copy(
             settingsState = settingsReducer(state.settingsState, action)
         )
+
+        is NavigationAction -> when (action) {
+            is NavigationAction.NavigateToProfile -> state.copy(
+                currentScreen = Screen.PROFILE,
+                navigationParams = mapOf("userId" to action.userId)
+            )
+
+            is NavigationAction.NavigateToSettings -> state.copy(
+                currentScreen = Screen.SETTINGS,
+                navigationParams = mapOf("fromScreen" to action.fromScreen)
+            )
+
+            NavigationAction.NavigateBack -> when (state.currentScreen) {
+                Screen.PROFILE -> state.copy(
+                    currentScreen = Screen.HOME,
+                    navigationParams = emptyMap()
+                )
+
+                Screen.SETTINGS -> state.copy(
+                    currentScreen = Screen.PROFILE,
+                    navigationParams = emptyMap()
+                )
+
+                Screen.HOME -> state
+            }
+        }
+
+
+        ExitApp -> AppState()
     }
 }
 
@@ -291,6 +393,32 @@ val profileReducer: ReducerForActionType<ProfileState, ProfileAction> = { state,
     }
 }
 
+
+@Composable
+fun ProfileScreen() {
+    val appStore: AppStore = koinInject()
+    val appState by appStore.stateFlow.collectAsState()
+
+    val userId = appState.navigationParams["userId"] as? String ?: "Unknown User"
+
+    Column {
+        Text("Profile Screen")
+        Text("User ID: $userId")
+        Text("Username: ${appState.profileState.username}")
+        Text("Bio: ${appState.profileState.bio}")
+
+        Button(onClick = {
+            appStore.dispatchAction(NavigationAction.NavigateToSettings(fromScreen = Screen.PROFILE))
+        }) {
+            Text("Go to Settings")
+        }
+
+        Button(onClick = { appStore.dispatchAction(NavigationAction.NavigateBack) }) {
+            Text("Back to Home")
+        }
+    }
+}
+
 //////////// SETTINGS ////////////
 data class SettingsState(
     val isDarkMode: Boolean = false,
@@ -308,3 +436,27 @@ val settingsReducer: ReducerForActionType<SettingsState, SettingsAction> = { sta
         is SettingsAction.ToggleNotifications -> state.copy(notificationsEnabled = !state.notificationsEnabled)
     }
 }
+
+@Composable
+fun SettingsScreen() {
+    val appStore: AppStore = koinInject()
+    val appState by appStore.stateFlow.collectAsState()
+
+    println(appState.currentScreen.toString())
+
+    println(appState.navigationParams.entries.toString())
+
+    val fromScreen = (appState.navigationParams["fromScreen"] as? Screen)?.name ?: "Unknown"
+
+    Column {
+        Text("Settings Screen")
+        Text("Navigated from: $fromScreen")
+        Text("Dark Mode: ${if (appState.settingsState.isDarkMode) "On" else "Off"}")
+        Text("Notifications: ${if (appState.settingsState.notificationsEnabled) "Enabled" else "Disabled"}")
+
+        Button(onClick = { appStore.dispatchAction(NavigationAction.NavigateBack) }) {
+            Text("Back")
+        }
+    }
+}
+
